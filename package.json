@@ -1,0 +1,41 @@
+{
+  "name": "workers-axiom",
+  "version": "0.1.0",
+  "description": "Structured logging, tracing, and metrics for Cloudflare Workers, with an Axiom tail-worker sink.",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sapt-ai-org/workers-axiom.git"
+  },
+  "exports": {
+    "./producer": {
+      "types": "./dist/producer/index.d.ts",
+      "import": "./dist/producer/index.js",
+      "default": "./dist/producer/index.js"
+    },
+    "./tail": {
+      "types": "./dist/tail/index.d.ts",
+      "import": "./dist/tail/index.js",
+      "default": "./dist/tail/index.js"
+    },
+    "./protocol": {
+      "types": "./dist/protocol/index.d.ts",
+      "import": "./dist/protocol/index.js",
+      "default": "./dist/protocol/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "scripts": {
+    "build": "rm -rf dist && tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "pnpm run build"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250101.0",
+    "typescript": "^5.6.0"
+  }
+}
