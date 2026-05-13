@@ -5,8 +5,8 @@ import {
   type SpanEvent,
   type SpanException,
   type SpanKind,
-} from '../../protocol'
-import type { Clock } from './clock'
+} from '../../protocol/index.js'
+import type { Clock } from './clock.js'
 
 export interface SpanOptions {
   kind: SpanKind
@@ -46,24 +46,58 @@ export interface ChildTraceContext extends TraceContext {
   readonly span_id: string
 }
 
-export interface RunSpanInput<T> {
+/**
+ * Tagged outcome of a span's lifetime. Callers settle a span with one of these
+ * tags so success / failure / cancellation each have a first-class encoding —
+ * no overloading of return values vs thrown exceptions, no "the error path is
+ * implicit." Borrowed from Effect's `Exit` shape.
+ *
+ * - `ok` — work completed successfully; carries the result value.
+ * - `error` — work failed; carries the thrown value. `isExpectedError` decides
+ *   whether the span records `status: error` or `status: ok` (expected user-facing
+ *   failures like `SaptError` shouldn't pollute error dashboards).
+ * - `aborted` — work was cancelled (e.g. user clicked stop, client disconnected).
+ *   Recorded as `status: ok` with a `span.aborted: true` attribute so dashboards
+ *   can distinguish abandonment from completion without inflating error rates.
+ */
+export type Exit<T> =
+  | { tag: 'ok'; value: T }
+  | { tag: 'error'; error: unknown }
+  | { tag: 'aborted' }
+
+/** Handle for a span whose lifetime is driven by external callbacks. */
+export interface SpanHandle {
+  /** Trace identifiers for the span. Use to build a child logger. */
+  readonly trace: ChildTraceContext
+  /**
+   * Emit the span event. Idempotent — second and later calls are ignored, so
+   * racing callbacks (e.g. `onError` after `onAbort`) settle deterministically
+   * on first-write-wins.
+   */
+  end(exit: Exit<unknown>): void
+}
+
+export interface StartSpanInput {
   parent: TraceContext
   resource: { service: string; environment: string | undefined }
   name: string
   options: SpanOptions
   clock: Clock
   isExpectedError?: (err: unknown) => boolean
-  fn: (child: ChildTraceContext) => Promise<T>
+  /** Invoked with the unexpected error once `end({ tag: 'error', error })` runs. */
   onUnexpectedError?: (err: unknown, child: ChildTraceContext) => void
 }
 
 /**
- * Run an async function inside a span. Emits a SpanEvent on completion (success or
- * failure). Errors matched by `isExpectedError` are recorded as `status: 'ok'` but
- * still re-thrown — they're expected user-facing failures, not span failures.
+ * Open a span whose lifetime is settled later by `handle.end(exit)`. Use when
+ * the span's duration doesn't align with a function scope — for example a span
+ * driven by streaming callbacks (`onFinish` / `onError` / `onAbort`).
+ *
+ * For function-scoped work prefer `runSpan` (or `logger.withSpan`), which can't
+ * leak because the function boundary settles the span automatically.
  */
-export async function runSpan<T>(input: RunSpanInput<T>): Promise<T> {
-  const { parent, resource, name, options, clock, isExpectedError, fn, onUnexpectedError } = input
+export function startSpan(input: StartSpanInput): SpanHandle {
+  const { parent, resource, name, options, clock, isExpectedError, onUnexpectedError } = input
   const child: ChildTraceContext = {
     trace_id: parent.trace_id,
     span_id: generateSpanId(),
@@ -77,25 +111,76 @@ export async function runSpan<T>(input: RunSpanInput<T>): Promise<T> {
     ...resource,
     name,
     kind: options.kind,
-    attributes: options.attributes,
   }
 
+  let settled = false
+  return {
+    trace: child,
+    end(exit: Exit<unknown>): void {
+      if (settled) return
+      settled = true
+      const endTimeUnixNano = clock.nowUnixNano()
+
+      if (exit.tag === 'ok') {
+        emitSpan({
+          ...base,
+          attributes: options.attributes,
+          status: 'ok',
+          startTimeUnixNano,
+          endTimeUnixNano,
+        })
+        return
+      }
+
+      if (exit.tag === 'aborted') {
+        emitSpan({
+          ...base,
+          attributes: { ...options.attributes, 'span.aborted': true },
+          status: 'ok',
+          startTimeUnixNano,
+          endTimeUnixNano,
+        })
+        return
+      }
+
+      // tag === 'error'
+      const expected = isExpectedError?.(exit.error) === true
+      const exception = expected ? undefined : toSpanException(exit.error)
+      emitSpan({
+        ...base,
+        attributes: options.attributes,
+        status: expected ? 'ok' : 'error',
+        statusMessage: exception?.message,
+        exception,
+        startTimeUnixNano,
+        endTimeUnixNano,
+      })
+      if (!expected) onUnexpectedError?.(exit.error, child)
+    },
+  }
+}
+
+export interface RunSpanInput<T> extends StartSpanInput {
+  fn: (child: ChildTraceContext) => Promise<T>
+}
+
+/**
+ * Run an async function inside a span. Emits a SpanEvent on completion (success or
+ * failure). Errors matched by `isExpectedError` are recorded as `status: 'ok'` but
+ * still re-thrown — they're expected user-facing failures, not span failures.
+ *
+ * Thin wrapper over `startSpan` for the common case where the span's lifetime
+ * aligns with a function call.
+ */
+export async function runSpan<T>(input: RunSpanInput<T>): Promise<T> {
+  const { fn, ...rest } = input
+  const handle = startSpan(rest)
   try {
-    const result = await fn(child)
-    emitSpan({ ...base, status: 'ok', startTimeUnixNano, endTimeUnixNano: clock.nowUnixNano() })
+    const result = await fn(handle.trace)
+    handle.end({ tag: 'ok', value: result })
     return result
   } catch (err) {
-    const expected = isExpectedError?.(err) === true
-    const exception = expected ? undefined : toSpanException(err)
-    emitSpan({
-      ...base,
-      status: expected ? 'ok' : 'error',
-      statusMessage: exception?.message,
-      exception,
-      startTimeUnixNano,
-      endTimeUnixNano: clock.nowUnixNano(),
-    })
-    if (!expected) onUnexpectedError?.(err, child)
+    handle.end({ tag: 'error', error: err })
     throw err
   }
 }

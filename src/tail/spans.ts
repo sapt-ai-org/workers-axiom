@@ -7,7 +7,7 @@
  * router that forwards only `sampled === true` spans. Logs/metrics/errors are
  * forwarded unconditionally by the caller — sampling gates traces, not log visibility.
  */
-import type { SpanEvent } from '../protocol'
+import type { SpanEvent } from '../protocol/index.js'
 
 const SPAN_KIND_TO_OTLP: Record<SpanEvent['kind'], number> = {
   internal: 1,

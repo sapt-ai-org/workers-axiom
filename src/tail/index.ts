@@ -1,5 +1,5 @@
-import { isSpanEvent, type SpanEvent, SUMMARY_PROPERTIES_TYPE } from '../protocol'
-import { sendSpansToAxiom } from './spans'
+import { isSpanEvent, type SpanEvent, SUMMARY_PROPERTIES_TYPE } from '../protocol/index.js'
+import { sendSpansToAxiom } from './spans.js'
 
 export interface AxiomConfig {
   /** Axiom API token. */
@@ -234,4 +234,4 @@ async function sendToAxiom(params: {
   }
 }
 
-export { sendSpansToAxiom } from './spans'
+export { sendSpansToAxiom } from './spans.js'

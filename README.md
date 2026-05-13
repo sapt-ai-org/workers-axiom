@@ -1,5 +1,8 @@
 # workers-axiom
 
+[![npm version](https://img.shields.io/npm/v/workers-axiom.svg)](https://www.npmjs.com/package/workers-axiom)
+[![license](https://img.shields.io/npm/l/workers-axiom.svg)](./LICENSE)
+
 Structured logging, tracing, and metrics for Cloudflare Workers, with an Axiom tail-worker sink.
 
 > **Status:** used internally by Sapt. Open source, MIT-licensed. PRs welcome, support is best-effort.

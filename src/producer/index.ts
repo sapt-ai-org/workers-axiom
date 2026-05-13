@@ -7,10 +7,11 @@ export {
   type LogContext,
   type Logger,
   type LoggerOptions,
+  type LoggerSpanHandle,
   type WithTraceOptions,
-} from './logger'
+} from './logger.js'
 
-export type { SpanOptions, TraceContext } from './tracing'
+export type { Exit, SpanHandle, SpanOptions, TraceContext } from './tracing/index.js'
 
 // Re-export wire-format types that consumers commonly need when extending
 // the producer (custom attributes, propagation helpers in middleware, etc.).
@@ -25,4 +26,4 @@ export {
   type SpanKind,
   type SpanStatus,
   type TraceParent,
-} from '../protocol'
+} from '../protocol/index.js'

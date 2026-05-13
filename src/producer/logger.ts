@@ -5,15 +5,18 @@ import {
   parseTraceparent,
   type SpanKind,
   SUMMARY_PROPERTIES_TYPE,
-} from '../protocol'
+} from '../protocol/index.js'
 import {
   type Clock,
   createClock,
+  type Exit,
   runSpan,
+  type SpanHandle,
   type SpanOptions,
+  startSpan,
   toSpanException,
   type TraceContext,
-} from './tracing'
+} from './tracing/index.js'
 
 /**
  * Bag of correlation fields (requestId, actorId, etc.). Has no semantic meaning
@@ -55,13 +58,35 @@ export interface Logger {
    * creation) are recorded as `status: 'ok'` — they're expected user-facing
    * failures, not span failures.
    */
-  span<T>(name: string, options: SpanOptions, fn: (logger: Logger) => Promise<T>): Promise<T>
+  withSpan<T>(name: string, options: SpanOptions, fn: (logger: Logger) => Promise<T>): Promise<T>
+  /**
+   * Open a span whose lifetime is settled later. Use when the span's duration
+   * doesn't align with a function scope (typically driven by external
+   * callbacks like a streaming API's `onFinish`/`onError`/`onAbort`).
+   *
+   * Returns a handle bundling a `Logger` already bound to the new span (so
+   * logs/metrics emitted via it correlate automatically) and an `end(exit)`
+   * method that settles the span with an `Exit` outcome. `end` is idempotent —
+   * first call wins, later calls are ignored.
+   *
+   * Prefer `withSpan` when the span's lifetime aligns with a function — that
+   * form can't leak.
+   */
+  startSpan(name: string, options: SpanOptions): LoggerSpanHandle
   /**
    * Returns headers to propagate the current trace context on outbound calls.
    * Always include the result on outbound `fetch` calls (including service
    * bindings) to maintain a single distributed trace across services.
    */
   tracingHeaders(): Headers
+}
+
+/** Handle returned by `Logger.startSpan` — span-bound logger plus `end(exit)`. */
+export interface LoggerSpanHandle {
+  /** Child logger bound to the new span; pass into work that should correlate. */
+  readonly logger: Logger
+  /** Settle the span. Idempotent: first call wins. */
+  end(exit: Exit<unknown>): void
 }
 
 const BASE_LOG_LEVEL_KEY = 'logLevel'
@@ -261,7 +286,7 @@ function _createLogger(options: LoggerOptions, clock: Clock, trace: TraceContext
       )
     },
 
-    async span<T>(
+    async withSpan<T>(
       name: string,
       spanOptions: SpanOptions,
       fn: (logger: Logger) => Promise<T>
@@ -277,6 +302,23 @@ function _createLogger(options: LoggerOptions, clock: Clock, trace: TraceContext
         onUnexpectedError: (err, childCtx) =>
           _createLogger(options, clock, childCtx).error(err, `span "${name}" failed`),
       })
+    },
+
+    startSpan(name: string, spanOptions: SpanOptions): LoggerSpanHandle {
+      const handle = startSpan({
+        parent: trace,
+        resource: { service, environment },
+        name,
+        options: spanOptions,
+        clock,
+        isExpectedError,
+        onUnexpectedError: (err, childCtx) =>
+          _createLogger(options, clock, childCtx).error(err, `span "${name}" failed`),
+      })
+      return {
+        logger: _createLogger(options, clock, handle.trace),
+        end: handle.end,
+      }
     },
 
     tracingHeaders(): Headers {
@@ -315,7 +357,7 @@ export async function withTrace<T>(
   const { name, kind = 'server', attributes, ...loggerOptions } = options
   const logger = await createLogger(loggerOptions)
   try {
-    return await logger.span(name, { kind, attributes }, fn)
+    return await logger.withSpan(name, { kind, attributes }, fn)
   } catch (err) {
     if (hooks?.onError) {
       return await hooks.onError(err, logger)
@@ -337,7 +379,8 @@ export const noopLogger: Logger = {
   metric: () => {},
   summary: () => {},
   child: () => noopLogger,
-  span: <T>(_name: string, _options: SpanOptions, fn: (logger: Logger) => Promise<T>) =>
+  withSpan: <T>(_name: string, _options: SpanOptions, fn: (logger: Logger) => Promise<T>) =>
     fn(noopLogger),
+  startSpan: () => ({ logger: noopLogger, end: () => {} }),
   tracingHeaders: () => new Headers(),
 }
