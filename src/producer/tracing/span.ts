@@ -186,6 +186,7 @@ export async function runSpan<T>(input: RunSpanInput<T>): Promise<T> {
 }
 
 function emitSpan(input: Omit<SpanEvent, 'type'>): void {
+  if (input.environment === 'development') return
   const event: SpanEvent = { type: SPAN_EVENT_TYPE, ...input }
   // eslint-disable-next-line no-console
   console.log(JSON.stringify(event))

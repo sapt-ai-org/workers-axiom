@@ -271,6 +271,7 @@ function _createLogger(options: LoggerOptions, clock: Clock, trace: TraceContext
     },
 
     summary(properties: Record<string, unknown>) {
+      if (isDev) return
       // Bypass `emit` so trace-context, service, environment, and inherited
       // context don't ride along. Summary records are invocation-scoped and
       // exist only to feed `invocation_summary` in the tail worker.
