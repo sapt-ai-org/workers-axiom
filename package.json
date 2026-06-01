@@ -1,6 +1,6 @@
 {
   "name": "workers-axiom",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Structured logging, tracing, and metrics for Cloudflare Workers, with an Axiom tail-worker sink.",
   "type": "module",
   "license": "MIT",
