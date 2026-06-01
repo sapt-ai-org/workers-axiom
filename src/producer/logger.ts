@@ -262,7 +262,10 @@ function buildLogger(options: LoggerOptions, clock: Clock, trace: TraceContext):
     },
 
     metric(event: string, data?: Record<string, unknown>) {
-      if (isDev) return
+      if (isDev) {
+        console.log(`METRIC ${event}`)
+        return
+      }
       emit({ type: 'metric', event, ...data })
     },
 
