@@ -49,7 +49,7 @@ export default {
 
 async function handle(request: Request, env: Env, logger: Logger) {
   logger.info('handling request')
-  return logger.span('db.query', { kind: 'client' }, async (logger) => {
+  return logger.withSpan('db.query', { kind: 'client' }, async (logger) => {
     // ... use logger.tracingHeaders() on outbound fetches to propagate the trace
     return new Response('ok')
   })
@@ -70,11 +70,13 @@ interface Env {
 }
 
 export default {
-  tail: (events: TraceItem[], env: Env, ctx: ExecutionContext) =>
-    createTailHandler({
+  async tail(events: TraceItem[], env: Env, ctx: ExecutionContext) {
+    const handler = createTailHandler({
       axiomToken: env.AXIOM_TOKEN,
       axiomDataset: env.AXIOM_DATASET,
-    })(events, env, ctx),
+    })
+    return handler(events, env, ctx)
+  },
 }
 ```
 
@@ -139,7 +141,7 @@ Sampling is decided once at the trace root, propagated via `traceparent`, and st
 The logger doesn't auto-instrument outbound `fetch`. Wrap each outbound call in `logger.span(...)` and copy `logger.tracingHeaders()` onto the request — that's what makes the downstream service join the same trace:
 
 ```ts
-await logger.span('backend.fetch', { kind: 'client' }, async (logger) => {
+await logger.withSpan('backend.fetch', { kind: 'client' }, async (logger) => {
   const headers = new Headers(init.headers)
   for (const [k, v] of logger.tracingHeaders()) headers.set(k, v)
   return fetch(url, { ...init, headers })

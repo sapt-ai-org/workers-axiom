@@ -142,6 +142,7 @@ export function createTailHandler(config: AxiomConfig): TailHandler {
   }
 }
 
+
 interface AxiomEvent {
   _time: string
   worker: string
@@ -178,9 +179,9 @@ interface ExtractedFields {
   resStatus?: number
 }
 
-function extractRequestInfo(event: unknown): ExtractedFields | null {
+function extractRequestInfo(event: unknown): ExtractedFields {
   const fetchEvent = event as TraceItemFetchEvent | undefined
-  if (!fetchEvent?.request) return null
+  if (!fetchEvent?.request) return {}
 
   const req = fetchEvent.request
   const headers = req.headers ?? {}
@@ -233,5 +234,3 @@ async function sendToAxiom(params: {
     )
   }
 }
-
-export { sendSpansToAxiom } from './spans.js'

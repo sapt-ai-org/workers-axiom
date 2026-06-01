@@ -11,12 +11,11 @@ import {
   createClock,
   type Exit,
   runSpan,
-  type SpanHandle,
   type SpanOptions,
   startSpan,
   toSpanException,
   type TraceContext,
-} from './tracing/index.js'
+} from './tracing.js'
 
 /**
  * Bag of correlation fields (requestId, actorId, etc.). Has no semantic meaning
@@ -177,7 +176,7 @@ export async function createLogger(options: LoggerOptions): Promise<Logger> {
     ? parseTraceparent(options.headers.get('traceparent'))
     : undefined
   const sampled = incoming?.sampled ?? Math.random() < (options.sampleRate ?? 1)
-  return _createLogger({ ...options, level }, createClock(), {
+  return buildLogger({ ...options, level }, createClock(), {
     trace_id: incoming?.trace_id ?? generateTraceId(),
     span_id: undefined,
     parent_span_id: incoming?.span_id,
@@ -198,7 +197,7 @@ async function resolveLogLevel(opts: {
   return isValidLogLevel(value) ? value : (opts.level ?? 'info')
 }
 
-function _createLogger(options: LoggerOptions, clock: Clock, trace: TraceContext): Logger {
+function buildLogger(options: LoggerOptions, clock: Clock, trace: TraceContext): Logger {
   const { service, environment, isExpectedError, level = 'info' } = options
   const context: LogContext = { ...options.context }
 
@@ -209,7 +208,6 @@ function _createLogger(options: LoggerOptions, clock: Clock, trace: TraceContext
   }
 
   const emit = (entry: Record<string, unknown>) => {
-    // eslint-disable-next-line no-console
     console.log(
       JSON.stringify({
         service,
@@ -228,7 +226,6 @@ function _createLogger(options: LoggerOptions, clock: Clock, trace: TraceContext
     if (!shouldLog(logLevel)) return
     if (isDev) {
       const levelTag = logLevel.toUpperCase().padEnd(5)
-      // eslint-disable-next-line no-console
       console.log(`${levelTag} ${message}`)
     } else {
       emit({ type: 'log', level: logLevel, message })
@@ -258,7 +255,6 @@ function _createLogger(options: LoggerOptions, clock: Clock, trace: TraceContext
       const exception = error instanceof Error ? toSpanException(error) : undefined
       const body = message ?? (error instanceof Error ? error.message : String(error))
       if (isDev) {
-        // eslint-disable-next-line no-console
         console.log(`ERROR ${body}${exception?.stacktrace ? `\n${exception.stacktrace}` : ''}`)
       } else {
         emit({ type: 'error', message: body, ...(exception !== undefined ? { exception } : {}) })
@@ -275,12 +271,11 @@ function _createLogger(options: LoggerOptions, clock: Clock, trace: TraceContext
       // Bypass `emit` so trace-context, service, environment, and inherited
       // context don't ride along. Summary records are invocation-scoped and
       // exist only to feed `invocation_summary` in the tail worker.
-      // eslint-disable-next-line no-console
       console.log(JSON.stringify({ type: SUMMARY_PROPERTIES_TYPE, ...properties }))
     },
 
     child(newContext: LogContext): Logger {
-      return _createLogger(
+      return buildLogger(
         { ...options, context: { ...context, ...newContext } },
         clock,
         trace
@@ -299,9 +294,9 @@ function _createLogger(options: LoggerOptions, clock: Clock, trace: TraceContext
         options: spanOptions,
         clock,
         isExpectedError,
-        fn: (childCtx) => fn(_createLogger(options, clock, childCtx)),
+        fn: (childCtx) => fn(buildLogger(options, clock, childCtx)),
         onUnexpectedError: (err, childCtx) =>
-          _createLogger(options, clock, childCtx).error(err, `span "${name}" failed`),
+          buildLogger(options, clock, childCtx).error(err, `span "${name}" failed`),
       })
     },
 
@@ -314,10 +309,10 @@ function _createLogger(options: LoggerOptions, clock: Clock, trace: TraceContext
         clock,
         isExpectedError,
         onUnexpectedError: (err, childCtx) =>
-          _createLogger(options, clock, childCtx).error(err, `span "${name}" failed`),
+          buildLogger(options, clock, childCtx).error(err, `span "${name}" failed`),
       })
       return {
-        logger: _createLogger(options, clock, handle.trace),
+        logger: buildLogger(options, clock, handle.trace),
         end: handle.end,
       }
     },

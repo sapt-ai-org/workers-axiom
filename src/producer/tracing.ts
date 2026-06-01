@@ -5,8 +5,7 @@ import {
   type SpanEvent,
   type SpanException,
   type SpanKind,
-} from '../../protocol/index.js'
-import type { Clock } from './clock.js'
+} from '../protocol/index.js'
 
 export interface SpanOptions {
   kind: SpanKind
@@ -18,7 +17,7 @@ export interface SpanOptions {
  *
  * `span_id` is the id of the span this logger is currently bound to. A root
  * logger created by `createLogger` is not yet bound to any span; its `span_id`
- * is `undefined`. Once `logger.span(...)` runs, the child logger inside is
+ * is `undefined`. Once `logger.withSpan(...)` runs, the child logger inside is
  * bound to a real span and its `span_id` is defined — see {@link ChildTraceContext}.
  *
  * `parent_span_id` is the upstream span this trace continues (across services,
@@ -54,11 +53,10 @@ export interface ChildTraceContext extends TraceContext {
  *
  * - `ok` — work completed successfully; carries the result value.
  * - `error` — work failed; carries the thrown value. `isExpectedError` decides
- *   whether the span records `status: error` or `status: ok` (expected user-facing
- *   failures like `SaptError` shouldn't pollute error dashboards).
- * - `aborted` — work was cancelled (e.g. user clicked stop, client disconnected).
- *   Recorded as `status: ok` with a `span.aborted: true` attribute so dashboards
- *   can distinguish abandonment from completion without inflating error rates.
+ *   whether the span records `status: error` or `status: ok`.
+ * - `aborted` — work was cancelled (e.g. client disconnected). Recorded as
+ *   `status: ok` with a `span.aborted: true` attribute so dashboards can
+ *   distinguish abandonment from completion without inflating error rates.
  */
 export type Exit<T> =
   | { tag: 'ok'; value: T }
@@ -75,6 +73,42 @@ export interface SpanHandle {
    * on first-write-wins.
    */
   end(exit: Exit<unknown>): void
+}
+
+/**
+ * Monotonic-anchored wall clock for span timing.
+ *
+ * Span timestamps come from a single anchor captured at root-logger creation:
+ * `unixMsAtAnchor` (Date.now() at anchor time) plus elapsed `performance.now()`
+ * since the anchor. This preserves sub-ms ordering within a request and avoids
+ * drift if Date.now() jumps mid-request (rare on Workers, but free to guard).
+ *
+ * Cross-service clock skew is not addressed — Workers in different colos may
+ * have small wall-clock differences. Tracing UIs tolerate this; it's not
+ * fixable from inside the worker.
+ */
+export interface Clock {
+  /** Returns the current time as Unix epoch nanoseconds (string, no precision loss). */
+  nowUnixNano(): string
+}
+
+export function createClock(): Clock {
+  const unixMsAtAnchor = Date.now()
+  const perfAtAnchor = performanceNow()
+
+  return {
+    nowUnixNano(): string {
+      const elapsedMs = performanceNow() - perfAtAnchor
+      const unixMs = unixMsAtAnchor + elapsedMs
+      return BigInt(Math.trunc(unixMs * 1_000_000)).toString()
+    },
+  }
+}
+
+function performanceNow(): number {
+  return typeof performance !== 'undefined' && typeof performance.now === 'function'
+    ? performance.now()
+    : Date.now()
 }
 
 export interface StartSpanInput {
@@ -106,12 +140,7 @@ export function startSpan(input: StartSpanInput): SpanHandle {
   }
 
   const startTimeUnixNano = clock.nowUnixNano()
-  const base = {
-    ...child,
-    ...resource,
-    name,
-    kind: options.kind,
-  }
+  const base = { ...child, ...resource, name, kind: options.kind }
 
   let settled = false
   return {
@@ -143,7 +172,6 @@ export function startSpan(input: StartSpanInput): SpanHandle {
         return
       }
 
-      // tag === 'error'
       const expected = isExpectedError?.(exit.error) === true
       const exception = expected ? undefined : toSpanException(exit.error)
       emitSpan({
@@ -165,9 +193,9 @@ export interface RunSpanInput<T> extends StartSpanInput {
 }
 
 /**
- * Run an async function inside a span. Emits a SpanEvent on completion (success or
- * failure). Errors matched by `isExpectedError` are recorded as `status: 'ok'` but
- * still re-thrown — they're expected user-facing failures, not span failures.
+ * Run an async function inside a span. Emits a SpanEvent on completion (success
+ * or failure). Errors matched by `isExpectedError` are recorded as `status: 'ok'`
+ * but still re-thrown — they're expected user-facing failures, not span failures.
  *
  * Thin wrapper over `startSpan` for the common case where the span's lifetime
  * aligns with a function call.
@@ -188,7 +216,6 @@ export async function runSpan<T>(input: RunSpanInput<T>): Promise<T> {
 function emitSpan(input: Omit<SpanEvent, 'type'>): void {
   if (input.environment === 'development') return
   const event: SpanEvent = { type: SPAN_EVENT_TYPE, ...input }
-  // eslint-disable-next-line no-console
   console.log(JSON.stringify(event))
 }
 
@@ -213,22 +240,12 @@ function serializeUnknown(value: unknown): string {
   if (value === null) return 'null'
   if (value === undefined) return 'undefined'
   if (typeof value === 'string') return value
-  if (value instanceof Error) {
-    return JSON.stringify({
-      ...value,
-      name: value.name,
-      message: value.message,
-      stack: value.stack,
-    })
-  }
+  if (typeof value === 'bigint') return `${value}n`
+  if (typeof value === 'symbol') return value.toString()
+  if (typeof value === 'function') return '[function]'
   try {
     return JSON.stringify(value)
   } catch {
-    if (typeof value === 'number' || typeof value === 'boolean' || typeof value === 'bigint') {
-      return String(value)
-    }
-    if (typeof value === 'symbol') return value.toString()
-    if (typeof value === 'function') return '[function]'
     return '[unserializable]'
   }
 }
