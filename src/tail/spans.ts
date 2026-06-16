@@ -1,21 +1,14 @@
 /**
  * Span forwarding to Axiom's OTLP `/v1/traces` endpoint.
  *
- * Spans arrive as `console.log` JSON events with the {@link SpanEvent} wire format.
- * The sampling verdict is decided once at the trace root by the producing logger
- * and stamped on every span via `SpanEvent.sampled`; the tail worker is a pure
- * router that forwards only `sampled === true` spans. Logs/metrics/errors are
- * forwarded unconditionally by the caller — sampling gates traces, not log visibility.
+ * Spans arrive as `console.log` JSON events with the {@link SpanEvent} wire
+ * format. The sampling verdict is decided once at the trace root by the
+ * producing logger and stamped on every span via `SpanEvent.sampled`; the tail
+ * worker is a pure router that forwards only `sampled === true` spans.
+ * Logs/metrics/errors are forwarded unconditionally by the caller — sampling
+ * gates traces, not log visibility.
  */
 import type { SpanEvent } from '../protocol/index.js'
-
-const SPAN_KIND_TO_OTLP: Record<SpanEvent['kind'], number> = {
-  internal: 1,
-  server: 2,
-  client: 3,
-  producer: 4,
-  consumer: 5,
-}
 
 export interface SendSpansInput {
   spans: SpanEvent[]
@@ -73,10 +66,19 @@ interface OtlpSpan {
   events?: { timeUnixNano: string; name: string; attributes: OtlpAttribute[] }[]
 }
 
+const SPAN_KIND_TO_OTLP: Record<SpanEvent['kind'], number> = {
+  internal: 1,
+  server: 2,
+  client: 3,
+  producer: 4,
+  consumer: 5,
+}
+
 /**
  * Group spans by `(service, environment)` so each unique pair becomes its own
  * OTLP `ResourceSpans` entry. Axiom's Traces dashboard groups by `service.name`
- * from the resource block, so this grouping is what makes per-service filtering work.
+ * from the resource block, so this grouping is what makes per-service filtering
+ * work.
  */
 function toOtlpPayload(spans: SpanEvent[]): { resourceSpans: OtlpResourceSpans[] } {
   const byResource = new Map<string, SpanEvent[]>()

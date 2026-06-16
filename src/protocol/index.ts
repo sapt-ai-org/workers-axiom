@@ -1,9 +1,13 @@
 /**
  * Wire format shared by the producer (logger) and the tail-worker consumer.
  *
- * The producer emits JSON lines via `console.log`; the tail worker parses
- * them and forwards to Axiom. Both sides import these types so the format
- * is enforced by the type system rather than coordinated by string matching.
+ * The producer emits JSON lines via `console.log`; the tail worker parses them
+ * and forwards to Axiom. Both sides import these types so the format is
+ * enforced by the type system rather than coordinated by string matching.
+ *
+ * Naming: fields that cross this JSON boundary use `snake_case` (`trace_id`,
+ * `span_id`, `parent_span_id`, `sampled`) to match the W3C `traceparent` and
+ * OTel wire conventions. Everything else in this codebase is camelCase.
  */
 
 export const SPAN_EVENT_TYPE = 'span' as const
@@ -17,7 +21,7 @@ export type SpanStatus = 'ok' | 'error'
 
 export type AttributeValue = string | number | boolean
 
-export type SpanException = {
+export interface SpanException {
   type?: string
   message: string
   stacktrace?: string
@@ -45,12 +49,17 @@ export interface SpanEvent {
    */
   sampled: boolean
   /**
-   * Optional exception info attached when status === 'error'.
-   * Field names match OTel semantic conventions (`exception.type`,
-   * `exception.message`, `exception.stacktrace`, `exception.escaped`) so
-   * the tail worker maps them directly into the OTLP `exception` span event.
+   * Exception info attached when `status === 'error'`. Field names match OTel
+   * semantic conventions (`exception.type`, `exception.message`, etc.) so the
+   * tail worker maps them directly into the OTLP `exception` span event.
    */
   exception?: SpanException
+}
+
+export interface TraceParent {
+  trace_id: string
+  span_id: string
+  sampled: boolean
 }
 
 export function isSpanEvent(value: unknown): value is SpanEvent {
@@ -65,14 +74,6 @@ export function isSpanEvent(value: unknown): value is SpanEvent {
     typeof v.endTimeUnixNano === 'string' &&
     typeof v.service === 'string'
   )
-}
-
-const TRACEPARENT_RE = /^00-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})$/
-
-export interface TraceParent {
-  trace_id: string
-  span_id: string
-  sampled: boolean
 }
 
 export function parseTraceparent(header: string | null | undefined): TraceParent | undefined {
@@ -94,6 +95,8 @@ export function generateTraceId(): string {
 export function generateSpanId(): string {
   return randomHex(16)
 }
+
+const TRACEPARENT_RE = /^00-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})$/
 
 function randomHex(length: number): string {
   const bytes = new Uint8Array(length / 2)

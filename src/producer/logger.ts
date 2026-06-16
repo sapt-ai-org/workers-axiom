@@ -6,16 +6,19 @@ import {
   type SpanKind,
   SUMMARY_PROPERTIES_TYPE,
 } from '../protocol/index.js'
+import { type KVLike, type LogLevel, resolveLogLevel, shouldEmit } from './log-level.js'
 import {
   type Clock,
   createClock,
-  type Exit,
   runSpan,
+  type SpanExit,
   type SpanOptions,
   startSpan,
   toSpanException,
   type TraceContext,
 } from './tracing.js'
+
+export { LogLevel, type KVLike } from './log-level.js'
 
 /**
  * Bag of correlation fields (requestId, actorId, etc.). Has no semantic meaning
@@ -31,10 +34,18 @@ export interface Logger {
   readonly environment: string | undefined
   readonly context: Readonly<LogContext>
   readonly trace: TraceContext
+  /** Emit a `debug` log if the current level allows. */
   debug(message: string): void
+  /** Emit an `info` log if the current level allows. */
   info(message: string): void
+  /** Emit a `warn` log if the current level allows. */
   warn(message: string): void
+  /**
+   * Emit an `error` log. The thrown value is rendered into an OTel-shaped
+   * `exception` field when it's an `Error`; otherwise serialized into `message`.
+   */
   error(error: unknown, message?: string): void
+  /** Emit a metric event. Suppressed when `environment === 'development'`. */
   metric(event: string, data?: Record<string, unknown>): void
   /**
    * Emit fields the tail worker should merge onto this invocation's
@@ -64,9 +75,9 @@ export interface Logger {
    * callbacks like a streaming API's `onFinish`/`onError`/`onAbort`).
    *
    * Returns a handle bundling a `Logger` already bound to the new span (so
-   * logs/metrics emitted via it correlate automatically) and an `end(exit)`
-   * method that settles the span with an `Exit` outcome. `end` is idempotent —
-   * first call wins, later calls are ignored.
+   * logs/metrics emitted via it correlate automatically) and an `end(exit?)`
+   * method that settles the span. `end` is idempotent — first call wins, later
+   * calls are ignored.
    *
    * Prefer `withSpan` when the span's lifetime aligns with a function — that
    * form can't leak.
@@ -80,31 +91,12 @@ export interface Logger {
   tracingHeaders(): Headers
 }
 
-/** Handle returned by `Logger.startSpan` — span-bound logger plus `end(exit)`. */
+/** Handle returned by `Logger.startSpan` — span-bound logger plus `end(exit?)`. */
 export interface LoggerSpanHandle {
   /** Child logger bound to the new span; pass into work that should correlate. */
   readonly logger: Logger
   /** Settle the span. Idempotent: first call wins. */
-  end(exit: Exit<unknown>): void
-}
-
-const BASE_LOG_LEVEL_KEY = 'logLevel'
-
-export const LogLevel = {
-  debug: 0,
-  info: 1,
-  warn: 2,
-  error: 3,
-} as const
-
-export type LogLevel = keyof typeof LogLevel
-
-export function isValidLogLevel(value: unknown): value is LogLevel {
-  return typeof value === 'string' && value in LogLevel
-}
-
-export interface KVLike {
-  get(key: string): Promise<string | null>
+  end(exit?: SpanExit): void
 }
 
 export interface LoggerOptions {
@@ -159,6 +151,15 @@ export interface LoggerOptions {
   logLevelKey?: string
 }
 
+export interface WithTraceOptions extends LoggerOptions {
+  /** Span name. Use the entrypoint's logical operation, e.g. `api.fetch`, `scheduled.tick`. */
+  name: string
+  /** Span kind. Defaults to `'server'`. Use `'consumer'` for queue/cron. */
+  kind?: SpanKind
+  /** Attributes to attach to the root span. */
+  attributes?: Record<string, AttributeValue>
+}
+
 /**
  * Create a new logger. If `options.headers` carries a `traceparent`, the trace
  * is continued; otherwise a fresh trace starts.
@@ -184,17 +185,49 @@ export async function createLogger(options: LoggerOptions): Promise<Logger> {
   })
 }
 
-async function resolveLogLevel(opts: {
-  environment?: string
-  kv?: KVLike
-  logLevelKey?: string
-  level?: LogLevel
-}): Promise<LogLevel> {
-  if (opts.environment === 'development') return 'debug'
-  if (!opts.kv) return opts.level ?? 'info'
-  const key = opts.logLevelKey ? `${BASE_LOG_LEVEL_KEY}:${opts.logLevelKey}` : BASE_LOG_LEVEL_KEY
-  const value = await opts.kv.get(key)
-  return isValidLogLevel(value) ? value : (opts.level ?? 'info')
+/**
+ * Entrypoint helper: build a logger and wrap the handler in a root span in one
+ * call. The root span is what local child spans (`logger.withSpan(...)`) parent
+ * to, so without it those children are orphaned in the trace viewer.
+ *
+ * For HTTP entrypoints, pass `headers` to continue any inbound `traceparent`.
+ * For queue/cron entrypoints, omit `headers` and the trace starts fresh.
+ * Pass `kv` to resolve the log level from KV.
+ */
+export async function withTrace<T>(
+  options: WithTraceOptions,
+  fn: (logger: Logger) => Promise<T>,
+  hooks?: { onError?: (err: unknown, logger: Logger) => T | Promise<T> }
+): Promise<T> {
+  const { name, kind = 'server', attributes, ...loggerOptions } = options
+  const logger = await createLogger(loggerOptions)
+  try {
+    return await logger.withSpan(name, { kind, attributes }, fn)
+  } catch (err) {
+    if (hooks?.onError) {
+      return await hooks.onError(err, logger)
+    }
+    throw err
+  }
+}
+
+/** No-op logger for tests and environments where logging should be suppressed. */
+export const noopLogger: Logger = {
+  service: '',
+  environment: undefined,
+  context: {},
+  trace: { trace_id: '', span_id: undefined, parent_span_id: undefined, sampled: false },
+  debug: () => {},
+  info: () => {},
+  warn: () => {},
+  error: () => {},
+  metric: () => {},
+  summary: () => {},
+  child: () => noopLogger,
+  withSpan: <T>(_name: string, _options: SpanOptions, fn: (logger: Logger) => Promise<T>) =>
+    fn(noopLogger),
+  startSpan: () => ({ logger: noopLogger, end: () => {} }),
+  tracingHeaders: () => new Headers(),
 }
 
 function buildLogger(options: LoggerOptions, clock: Clock, trace: TraceContext): Logger {
@@ -203,9 +236,7 @@ function buildLogger(options: LoggerOptions, clock: Clock, trace: TraceContext):
 
   const isDev = environment === 'development'
 
-  const shouldLog = (logLevel: LogLevel): boolean => {
-    return LogLevel[logLevel] >= LogLevel[level]
-  }
+  const shouldLog = (logLevel: LogLevel): boolean => shouldEmit(logLevel, level)
 
   const emit = (entry: Record<string, unknown>) => {
     console.log(
@@ -255,7 +286,7 @@ function buildLogger(options: LoggerOptions, clock: Clock, trace: TraceContext):
       const exception = error instanceof Error ? toSpanException(error) : undefined
       const body = message ?? (error instanceof Error ? error.message : String(error))
       if (isDev) {
-        console.log(`ERROR ${body}${exception?.stacktrace ? `\n${exception.stacktrace}` : ''}`)
+        console.error(`ERROR ${body}${exception?.stacktrace ? `\n${exception.stacktrace}` : ''}`)
       } else {
         emit({ type: 'error', message: body, ...(exception !== undefined ? { exception } : {}) })
       }
@@ -263,7 +294,7 @@ function buildLogger(options: LoggerOptions, clock: Clock, trace: TraceContext):
 
     metric(event: string, data?: Record<string, unknown>) {
       if (isDev) {
-        console.log(`METRIC ${event}`)
+        console.info(`METRIC ${event}`)
         return
       }
       emit({ type: 'metric', event, ...data })
@@ -278,11 +309,7 @@ function buildLogger(options: LoggerOptions, clock: Clock, trace: TraceContext):
     },
 
     child(newContext: LogContext): Logger {
-      return buildLogger(
-        { ...options, context: { ...context, ...newContext } },
-        clock,
-        trace
-      )
+      return buildLogger({ ...options, context: { ...context, ...newContext } }, clock, trace)
     },
 
     async withSpan<T>(
@@ -328,58 +355,4 @@ function buildLogger(options: LoggerOptions, clock: Clock, trace: TraceContext):
       return headers
     },
   }
-}
-
-export interface WithTraceOptions extends LoggerOptions {
-  /** Span name. Use the entrypoint's logical operation, e.g. `api.fetch`, `scheduled.tick`. */
-  name: string
-  /** Span kind. Defaults to `'server'`. Use `'consumer'` for queue/cron. */
-  kind?: SpanKind
-  /** Attributes to attach to the root span. */
-  attributes?: Record<string, AttributeValue>
-}
-
-/**
- * Entrypoint helper: build a logger and wrap the handler in a root span in one
- * call. The root span is what local child spans (`logger.span(...)`) parent to,
- * so without it those children are orphaned in the trace viewer.
- *
- * For HTTP entrypoints, pass `headers` to continue any inbound `traceparent`.
- * For queue/cron entrypoints, omit `headers` and the trace starts fresh.
- * Pass `kv` to resolve the log level from KV.
- */
-export async function withTrace<T>(
-  options: WithTraceOptions,
-  fn: (logger: Logger) => Promise<T>,
-  hooks?: { onError?: (err: unknown, logger: Logger) => T | Promise<T> }
-): Promise<T> {
-  const { name, kind = 'server', attributes, ...loggerOptions } = options
-  const logger = await createLogger(loggerOptions)
-  try {
-    return await logger.withSpan(name, { kind, attributes }, fn)
-  } catch (err) {
-    if (hooks?.onError) {
-      return await hooks.onError(err, logger)
-    }
-    throw err
-  }
-}
-
-/** No-op logger for tests and environments where logging should be suppressed. */
-export const noopLogger: Logger = {
-  service: '',
-  environment: undefined,
-  context: {},
-  trace: { trace_id: '', span_id: undefined, parent_span_id: undefined, sampled: false },
-  debug: () => {},
-  info: () => {},
-  warn: () => {},
-  error: () => {},
-  metric: () => {},
-  summary: () => {},
-  child: () => noopLogger,
-  withSpan: <T>(_name: string, _options: SpanOptions, fn: (logger: Logger) => Promise<T>) =>
-    fn(noopLogger),
-  startSpan: () => ({ logger: noopLogger, end: () => {} }),
-  tracingHeaders: () => new Headers(),
 }

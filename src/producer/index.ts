@@ -1,6 +1,6 @@
 export {
-  LogLevel,
   createLogger,
+  LogLevel,
   noopLogger,
   withTrace,
   type KVLike,
@@ -11,4 +11,4 @@ export {
   type WithTraceOptions,
 } from './logger.js'
 
-export type { Exit, SpanHandle, SpanOptions, TraceContext } from './tracing.js'
+export type { SpanExit, SpanHandle, SpanOptions, TraceContext } from './tracing.js'

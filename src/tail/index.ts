@@ -13,9 +13,7 @@ export interface AxiomConfig {
    * The dataset name is appended automatically.
    */
   ingestBaseUrl?: string
-  /**
-   * Axiom OTLP traces endpoint. Defaults to `https://api.axiom.co/v1/traces`.
-   */
+  /** Axiom OTLP traces endpoint. Defaults to `https://api.axiom.co/v1/traces`. */
   tracesEndpoint?: string
 }
 
@@ -142,7 +140,6 @@ export function createTailHandler(config: AxiomConfig): TailHandler {
   }
 }
 
-
 interface AxiomEvent {
   _time: string
   worker: string
@@ -165,7 +162,7 @@ interface TraceItemFetchEvent {
   }
 }
 
-interface ExtractedFields {
+interface ExtractedRequestFields {
   reqMethod?: string
   reqUrl?: string
   reqPath?: string
@@ -179,7 +176,7 @@ interface ExtractedFields {
   resStatus?: number
 }
 
-function extractRequestInfo(event: unknown): ExtractedFields {
+function extractRequestInfo(event: unknown): ExtractedRequestFields {
   const fetchEvent = event as TraceItemFetchEvent | undefined
   if (!fetchEvent?.request) return {}
 
@@ -191,7 +188,7 @@ function extractRequestInfo(event: unknown): ExtractedFields {
   try {
     if (req.url) path = new URL(req.url).pathname
   } catch {
-    // Invalid URL
+    // Invalid URL — leave path undefined.
   }
 
   return {
